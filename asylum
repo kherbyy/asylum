@@ -11,8 +11,9 @@ local ESPEnabled = true
 local AimbotEnabled = true
 local VisualizeHitbox = false
 local FullTeamESP = false
+local FullBodyFill = false  -- NEW: false = outline only | true = full body colored highlight
 local Highlights = {}
-local ToolLabels = {} -- char → BillboardGui (shows equipped tool name)
+local ToolLabels = {}
 local BoxHandles = {}
 local HoldingRMB = false
 local CurrentTarget = nil
@@ -53,7 +54,7 @@ elseif LocalPlayer.Name == "K3TCHUPSS" then
     AlertText = "HELP YOUR BOYFRIEND!"
 end
 
--- ==================== HOSTILE COUNTER UI (Bottom-Left Subtitle) ====================
+-- ==================== HOSTILE COUNTER UI (Bottom-Left) ====================
 local HostileGui = Instance.new("ScreenGui")
 HostileGui.Name = "HostileCounterUI"
 HostileGui.ResetOnSpawn = false
@@ -269,7 +270,6 @@ local function UpdateESP()
         if shouldHighlight then
             if not Highlights[char] then
                 local hl = Instance.new("Highlight")
-                hl.FillTransparency = 1
                 hl.OutlineTransparency = 0
                 hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
                 hl.Parent = char
@@ -288,6 +288,14 @@ local function UpdateESP()
                 elseif player.Team == OrderlyTeam then hl.OutlineColor = Color3.fromRGB(0, 120, 255)
                 elseif player.Team == MedicalTeam then hl.OutlineColor = Color3.fromRGB(0, 255, 80) end
             end
+
+            -- NEW: Full Body Fill Toggle
+            if FullBodyFill then
+                hl.FillTransparency = 0.35
+                hl.FillColor = hl.OutlineColor
+            else
+                hl.FillTransparency = 1
+            end
         else
             if Highlights[char] then
                 Highlights[char]:Destroy()
@@ -295,7 +303,7 @@ local function UpdateESP()
             end
         end
 
-        -- Show equipped tool name above hostile heads
+        -- Tool name above hostile heads
         if isHostile then
             local tool = char:FindFirstChildWhichIsA("Tool")
             local toolName = tool and tool.Name or "Fists"
@@ -594,6 +602,9 @@ UserInputService.InputBegan:Connect(function(Input, GameProcessed)
     elseif Input.KeyCode == Enum.KeyCode.K then
         FullTeamESP = not FullTeamESP
         print("Full Team ESP: " .. (FullTeamESP and "ON" or "OFF"))
+    elseif Input.KeyCode == Enum.KeyCode.L then
+        FullBodyFill = not FullBodyFill
+        print("Full Body Fill: " .. (FullBodyFill and "ON (colored body)" or "OFF (outline only)"))
     elseif Input.UserInputType == Enum.UserInputType.MouseButton2 then
         HoldingRMB = true
     end
