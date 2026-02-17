@@ -1,0 +1,624 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local Teams = game:GetService("Teams")
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+local ESPEnabled = true
+local AimbotEnabled = true
+local VisualizeHitbox = false
+local FullTeamESP = false
+local Highlights = {}
+local ToolLabels = {} -- char → BillboardGui (shows equipped tool name)
+local BoxHandles = {}
+local HoldingRMB = false
+local CurrentTarget = nil
+local PartnerTracer = nil
+local PartnerHealthBar = nil
+local DamageAlertGui = nil
+local CurrentHitboxScale = 10
+local MinScale = 5
+local MaxScale = 50
+local ScaleStep = 5
+
+local AimbotConfig = {
+    AimPartPriority = {"HumanoidRootPart", "UpperTorso", "Torso", "Head"},
+    MaxDistance = 500,
+    FOVCheck = false,
+    FOV = 200,
+}
+
+local MyPartner = ""
+local AlertText = ""
+local SpectateEnabled = false
+local OriginalCameraSubject = nil
+local PartnerHumanoid = nil
+local LastPartnerHealth = nil
+local AlertActive = false
+local AlertEndTime = 0
+
+local MPTTeam = Teams:FindFirstChild("MPT")
+local PatientTeam = Teams:FindFirstChild("PATIENT")
+local OrderlyTeam = Teams:FindFirstChild("ORDERLY")
+local MedicalTeam = Teams:FindFirstChild("MEDICAL")
+
+if LocalPlayer.Name == "Zenridge91" then
+    MyPartner = "K3TCHUPSS"
+    AlertText = "HELP YOUR GIRLFRIEND!"
+elseif LocalPlayer.Name == "K3TCHUPSS" then
+    MyPartner = "Zenridge91"
+    AlertText = "HELP YOUR BOYFRIEND!"
+end
+
+-- ==================== HOSTILE COUNTER UI (Bottom-Left Subtitle) ====================
+local HostileGui = Instance.new("ScreenGui")
+HostileGui.Name = "HostileCounterUI"
+HostileGui.ResetOnSpawn = false
+HostileGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local HostileFrame = Instance.new("Frame")
+HostileFrame.Size = UDim2.new(0, 160, 0, 38)
+HostileFrame.Position = UDim2.new(0, 20, 1, -60)
+HostileFrame.AnchorPoint = Vector2.new(0, 1)
+HostileFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+HostileFrame.BackgroundTransparency = 0.35
+HostileFrame.BorderSizePixel = 0
+HostileFrame.Parent = HostileGui
+
+local FrameCorner = Instance.new("UICorner")
+FrameCorner.CornerRadius = UDim.new(0, 10)
+FrameCorner.Parent = HostileFrame
+
+local FrameStroke = Instance.new("UIStroke")
+FrameStroke.Color = Color3.fromRGB(255, 0, 0)
+FrameStroke.Thickness = 1.5
+FrameStroke.Transparency = 0.6
+FrameStroke.Parent = HostileFrame
+
+local PulseCircle = Instance.new("Frame")
+PulseCircle.Size = UDim2.new(0, 22, 0, 22)
+PulseCircle.Position = UDim2.new(0, 12, 0.5, 0)
+PulseCircle.AnchorPoint = Vector2.new(0, 0.5)
+PulseCircle.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
+PulseCircle.BorderSizePixel = 0
+PulseCircle.Parent = HostileFrame
+
+local CircleCorner = Instance.new("UICorner")
+CircleCorner.CornerRadius = UDim.new(1, 0)
+CircleCorner.Parent = PulseCircle
+
+local HostileCountLabel = Instance.new("TextLabel")
+HostileCountLabel.Size = UDim2.new(1, -50, 1, 0)
+HostileCountLabel.Position = UDim2.new(0, 42, 0, 0)
+HostileCountLabel.BackgroundTransparency = 1
+HostileCountLabel.Text = "Hostiles: 0"
+HostileCountLabel.TextColor3 = Color3.new(1, 1, 1)
+HostileCountLabel.TextStrokeTransparency = 0.7
+HostileCountLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+HostileCountLabel.Font = Enum.Font.GothamSemibold
+HostileCountLabel.TextSize = 18
+HostileCountLabel.TextXAlignment = Enum.TextXAlignment.Left
+HostileCountLabel.Parent = HostileFrame
+
+local PulseTween = nil
+local function UpdatePulse(count)
+    if count > 0 then
+        if not PulseTween then
+            PulseTween = TweenService:Create(PulseCircle, TweenInfo.new(0.65, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {
+                BackgroundColor3 = Color3.fromRGB(255, 20, 20)
+            })
+            PulseTween:Play()
+        end
+    else
+        if PulseTween then PulseTween:Cancel() PulseTween = nil end
+        PulseCircle.BackgroundColor3 = Color3.fromRGB(180, 0, 0)
+    end
+end
+
+HostileGui.Enabled = ESPEnabled
+-- =============================================================================
+
+local function IsTargetValid(part)
+    if not part or not part.Parent then return false end
+    local char = part.Parent
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+    local player = Players:GetPlayerFromCharacter(char)
+    if not player or player == LocalPlayer or player.Name == MyPartner then return false end
+    local dist3D = (part.Position - Camera.CFrame.Position).Magnitude
+    if dist3D > AimbotConfig.MaxDistance then return false end
+    if AimbotConfig.FOVCheck then
+        local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
+        if not onScreen then return false end
+        local dist2D = (Vector2.new(screenPos.X, screenPos.Y) - UserInputService:GetMouseLocation()).Magnitude
+        if dist2D > AimbotConfig.FOV then return false end
+    end
+    return true
+end
+
+local function GetClosestTarget()
+    local ClosestPart = nil
+    local ClosestDistance = math.huge
+    local MousePos = UserInputService:GetMouseLocation()
+    for _, Player in ipairs(Players:GetPlayers()) do
+        if Player == LocalPlayer or Player.Name == MyPartner then continue end
+        if not Player.Character then continue end
+        local Character = Player.Character
+        local Humanoid = Character:FindFirstChildOfClass("Humanoid")
+        if Humanoid and Humanoid.Health <= 0 then continue end
+        local AimPart = nil
+        for _, partName in ipairs(AimbotConfig.AimPartPriority) do
+            AimPart = Character:FindFirstChild(partName)
+            if AimPart then break end
+        end
+        if not AimPart then continue end
+        local ScreenPos, OnScreen = Camera:WorldToViewportPoint(AimPart.Position)
+        if not OnScreen then continue end
+        local Distance2D = (Vector2.new(ScreenPos.X, ScreenPos.Y) - MousePos).Magnitude
+        local Distance3D = (AimPart.Position - Camera.CFrame.Position).Magnitude
+        if Distance3D > AimbotConfig.MaxDistance then continue end
+        if AimbotConfig.FOVCheck and Distance2D > AimbotConfig.FOV then continue end
+        if Distance2D < ClosestDistance then
+            ClosestDistance = Distance2D
+            ClosestPart = AimPart
+        end
+    end
+    return ClosestPart
+end
+
+local function UpdateAllHitboxes()
+    local newSize = Vector3.new(CurrentHitboxScale, CurrentHitboxScale, CurrentHitboxScale)
+    for _, Player in ipairs(Players:GetPlayers()) do
+        if Player == LocalPlayer or not Player.Character then continue end
+        local HRP = Player.Character:FindFirstChild("HumanoidRootPart")
+        if HRP then
+            HRP.Size = newSize
+            HRP.Transparency = 1
+            HRP.CanCollide = false
+        end
+        local box = BoxHandles[Player.Character]
+        if box then
+            box.Size = newSize
+            box.Visible = VisualizeHitbox
+        end
+    end
+end
+
+local function ApplyHitboxExpander(Character)
+    if not Character or Character == LocalPlayer.Character then return end
+    local HRP = Character:FindFirstChild("HumanoidRootPart")
+    if HRP then
+        local newSize = Vector3.new(CurrentHitboxScale, CurrentHitboxScale, CurrentHitboxScale)
+        HRP.Size = newSize
+        HRP.Transparency = 1
+        HRP.CanCollide = false
+        if not BoxHandles[Character] then
+            local box = Instance.new("BoxHandleAdornment")
+            box.Adornee = HRP
+            box.Size = newSize
+            box.Color3 = Color3.fromRGB(255, 0, 0)
+            box.Transparency = 0.5
+            box.AlwaysOnTop = true
+            box.ZIndex = 10
+            box.Visible = VisualizeHitbox
+            box.Parent = HRP
+            BoxHandles[Character] = box
+        else
+            BoxHandles[Character].Size = newSize
+            BoxHandles[Character].Visible = VisualizeHitbox
+        end
+    end
+end
+
+local function UpdateESP()
+    for char, hl in pairs(Highlights) do
+        if not char.Parent or not char:FindFirstChild("Humanoid") then
+            hl:Destroy()
+            Highlights[char] = nil
+        end
+    end
+
+    for char, bill in pairs(ToolLabels) do
+        if not char.Parent or not char:FindFirstChild("Humanoid") then
+            bill:Destroy()
+            ToolLabels[char] = nil
+        end
+    end
+
+    CurrentHostiles = {}
+
+    local overheadGuis = LocalPlayer.PlayerGui:FindFirstChild("OverheadGuis")
+    local hostileChars = {}
+    if overheadGuis then
+        for _, ov in pairs(overheadGuis:GetChildren()) do
+            if ov:IsA("BillboardGui") then
+                local holder = ov:FindFirstChild("Holder")
+                local hostile = holder and holder:FindFirstChild("Hostile")
+                if hostile and hostile.Visible then
+                    local char = ov.Adornee and ov.Adornee.Parent
+                    if char then
+                        hostileChars[char] = true
+                        CurrentHostiles[char] = true
+                    end
+                end
+            end
+        end
+    end
+
+    local hostileCount = 0
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        local char = player.Character
+        if not char or not char:FindFirstChild("Humanoid") then continue end
+
+        local isSpecial = (player.Name == MyPartner)
+        local isHostile = hostileChars[char] or false
+        local isTeam = player.Team and (player.Team == MPTTeam or player.Team == PatientTeam or player.Team == OrderlyTeam or player.Team == MedicalTeam)
+
+        if isHostile then
+            hostileCount = hostileCount + 1
+            CurrentHostiles[char] = true
+        end
+
+        local shouldHighlight = isSpecial or isHostile or (FullTeamESP and isTeam)
+
+        if shouldHighlight then
+            if not Highlights[char] then
+                local hl = Instance.new("Highlight")
+                hl.FillTransparency = 1
+                hl.OutlineTransparency = 0
+                hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                hl.Parent = char
+                Highlights[char] = hl
+            end
+
+            local hl = Highlights[char]
+
+            if isSpecial then
+                hl.OutlineColor = Color3.fromRGB(0, 100, 255)
+            elseif isHostile then
+                hl.OutlineColor = Color3.fromRGB(255, 0, 0)
+            elseif FullTeamESP then
+                if player.Team == MPTTeam then hl.OutlineColor = Color3.fromRGB(128, 0, 0)
+                elseif player.Team == PatientTeam then hl.OutlineColor = Color3.fromRGB(255, 255, 0)
+                elseif player.Team == OrderlyTeam then hl.OutlineColor = Color3.fromRGB(0, 120, 255)
+                elseif player.Team == MedicalTeam then hl.OutlineColor = Color3.fromRGB(0, 255, 80) end
+            end
+        else
+            if Highlights[char] then
+                Highlights[char]:Destroy()
+                Highlights[char] = nil
+            end
+        end
+
+        -- Show equipped tool name above hostile heads
+        if isHostile then
+            local tool = char:FindFirstChildWhichIsA("Tool")
+            local toolName = tool and tool.Name or "Fists"
+
+            if not ToolLabels[char] then
+                local bill = Instance.new("BillboardGui")
+                bill.Adornee = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+                bill.Size = UDim2.new(0, 200, 0, 30)
+                bill.StudsOffset = Vector3.new(0, 3.5, 0)
+                bill.AlwaysOnTop = true
+                bill.LightInfluence = 0
+                bill.Parent = char
+
+                local label = Instance.new("TextLabel")
+                label.Size = UDim2.new(1, 0, 1, 0)
+                label.BackgroundTransparency = 1
+                label.Text = toolName
+                label.TextColor3 = Color3.fromRGB(255, 80, 80)
+                label.TextStrokeTransparency = 0
+                label.Font = Enum.Font.GothamBold
+                label.TextSize = 15
+                label.Parent = bill
+
+                ToolLabels[char] = bill
+            else
+                local label = ToolLabels[char]:FindFirstChildWhichIsA("TextLabel")
+                if label then label.Text = toolName end
+            end
+        else
+            if ToolLabels[char] then
+                ToolLabels[char]:Destroy()
+                ToolLabels[char] = nil
+            end
+        end
+    end
+
+    HostileCountLabel.Text = "Hostiles: " .. hostileCount
+    UpdatePulse(hostileCount)
+end
+
+local function UpdatePartnerTracer()
+    if not ESPEnabled then
+        if PartnerTracer then PartnerTracer.Visible = false end
+        return
+    end
+    local partnerPlayer = Players:FindFirstChild(MyPartner)
+    if partnerPlayer and partnerPlayer.Character then
+        local root = partnerPlayer.Character:FindFirstChild("HumanoidRootPart") or partnerPlayer.Character:FindFirstChild("Torso")
+        if root then
+            local screenPos, onScreen = Camera:WorldToViewportPoint(root.Position)
+            if onScreen then
+                if not PartnerTracer then
+                    PartnerTracer = Drawing.new("Line")
+                    PartnerTracer.Color = Color3.fromRGB(0, 100, 255)
+                    PartnerTracer.Thickness = 2
+                    PartnerTracer.Transparency = 1
+                end
+                local screenSize = Camera.ViewportSize
+                PartnerTracer.From = Vector2.new(screenSize.X / 2, screenSize.Y)
+                PartnerTracer.To = Vector2.new(screenPos.X, screenPos.Y)
+                PartnerTracer.Visible = true
+                return
+            end
+        end
+    end
+    if PartnerTracer then PartnerTracer.Visible = false end
+end
+
+local function CreateDamageAlert()
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "DamageAlert"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    local text = Instance.new("TextLabel")
+    text.Size = UDim2.new(1, 0, 0.15, 0)
+    text.Position = UDim2.new(0, 0, 0.85, 0)
+    text.BackgroundTransparency = 1
+    text.Text = AlertText
+    text.TextColor3 = Color3.fromRGB(255, 0, 0)
+    text.TextStrokeTransparency = 0
+    text.TextStrokeColor3 = Color3.new(0, 0, 0)
+    text.Font = Enum.Font.GothamBlack
+    text.TextScaled = true
+    text.Visible = false
+    text.Parent = screenGui
+    DamageAlertGui = {Gui = screenGui, Text = text}
+end
+
+local function ShowDamageAlert()
+    if not DamageAlertGui then CreateDamageAlert() end
+    AlertEndTime = tick() + 6
+    if AlertActive then return end
+    DamageAlertGui.Text.Visible = true
+    DamageAlertGui.Text.TextTransparency = 0
+    AlertActive = true
+    task.spawn(function()
+        while tick() < AlertEndTime do
+            TweenService:Create(DamageAlertGui.Text, TweenInfo.new(0.4), {TextTransparency = 0}):Play()
+            task.wait(0.5)
+            TweenService:Create(DamageAlertGui.Text, TweenInfo.new(0.4), {TextTransparency = 1}):Play()
+            task.wait(0.5)
+        end
+        DamageAlertGui.Text.Visible = false
+        AlertActive = false
+    end)
+end
+
+local function UpdatePartnerHealthBar()
+    if not ESPEnabled then
+        if PartnerHealthBar then PartnerHealthBar.Gui.Enabled = false end
+        return
+    end
+    local partnerPlayer = Players:FindFirstChild(MyPartner)
+    if not partnerPlayer or not partnerPlayer.Character then
+        if PartnerHealthBar then PartnerHealthBar.Gui.Enabled = false end
+        return
+    end
+    local char = partnerPlayer.Character
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local head = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+    if not hum or not head then
+        if PartnerHealthBar then PartnerHealthBar.Gui.Enabled = false end
+        return
+    end
+    if not PartnerHealthBar then
+        local bill = Instance.new("BillboardGui")
+        bill.Name = "PartnerHealthBar"
+        bill.Adornee = head
+        bill.Size = UDim2.new(1, 0, 4, 0)
+        bill.StudsOffset = Vector3.new(4, 0, 0)
+        bill.AlwaysOnTop = true
+        bill.Enabled = true
+        local bg = Instance.new("Frame")
+        bg.Name = "BG"
+        bg.Size = UDim2.new(0.25, 0, 0.9, 0)
+        bg.Position = UDim2.new(0.375, 0, 0.05, 0)
+        bg.BackgroundColor3 = Color3.new(0, 0, 0)
+        bg.BorderSizePixel = 2
+        bg.BorderColor3 = Color3.new(1, 1, 1)
+        bg.Parent = bill
+        local fill = Instance.new("Frame")
+        fill.Name = "Fill"
+        fill.AnchorPoint = Vector2.new(0, 1)
+        fill.Position = UDim2.new(0, 0, 1, 0)
+        fill.Size = UDim2.new(1, 0, 1, 0)
+        fill.BackgroundColor3 = Color3.new(0, 1, 0)
+        fill.BorderSizePixel = 0
+        fill.Parent = bg
+        bill.Parent = char
+        PartnerHealthBar = {Gui = bill, Fill = fill}
+    end
+    PartnerHealthBar.Gui.Adornee = head
+    PartnerHealthBar.Gui.Enabled = true
+    local healthPct = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+    PartnerHealthBar.Fill.Size = UDim2.new(1, 0, healthPct, 0)
+    PartnerHealthBar.Fill.BackgroundColor3 = Color3.fromHSV(healthPct * 0.33, 1, 1)
+    if LastPartnerHealth ~= nil and hum.Health < LastPartnerHealth then
+        ShowDamageAlert()
+    end
+    LastPartnerHealth = hum.Health
+end
+
+local function UpdateSpectate()
+    if SpectateEnabled then
+        local partnerPlayer = Players:FindFirstChild(MyPartner)
+        if partnerPlayer and partnerPlayer.Character then
+            local hum = partnerPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                PartnerHumanoid = hum
+                Camera.CameraSubject = hum
+                return
+            end
+        end
+        SpectateEnabled = false
+        if OriginalCameraSubject then
+            Camera.CameraSubject = OriginalCameraSubject
+        else
+            local localHum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if localHum then
+                Camera.CameraSubject = localHum
+            end
+        end
+    end
+end
+
+local function ToggleSpectate()
+    local partnerPlayer = Players:FindFirstChild(MyPartner)
+    if SpectateEnabled then
+        SpectateEnabled = false
+        if OriginalCameraSubject then
+            Camera.CameraSubject = OriginalCameraSubject
+        else
+            local localHum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if localHum then
+                Camera.CameraSubject = localHum
+            end
+        end
+        PartnerHumanoid = nil
+    elseif partnerPlayer and partnerPlayer.Character then
+        local hum = partnerPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Health > 0 then
+            SpectateEnabled = true
+            OriginalCameraSubject = Camera.CameraSubject
+            Camera.CameraSubject = hum
+            PartnerHumanoid = hum
+        end
+    end
+end
+
+local function OnCharacterAdded(Character)
+    ApplyHitboxExpander(Character)
+    local player = Players:GetPlayerFromCharacter(Character)
+    if player and player.Name == MyPartner then
+        if PartnerHealthBar then PartnerHealthBar.Gui:Destroy() PartnerHealthBar = nil end
+        LastPartnerHealth = nil
+        task.wait(0.5)
+        if SpectateEnabled then
+            local hum = Character:FindFirstChildOfClass("Humanoid")
+            if hum then Camera.CameraSubject = hum PartnerHumanoid = hum end
+        end
+    elseif player == LocalPlayer then
+        task.wait(1)
+        local hum = Character:FindFirstChildOfClass("Humanoid")
+        if not SpectateEnabled and hum then
+            OriginalCameraSubject = hum
+            Camera.CameraSubject = hum
+        end
+    end
+end
+
+local function OnPlayerAdded(Player)
+    if Player == LocalPlayer then return end
+    if Player.Character then OnCharacterAdded(Player.Character) end
+    Player.CharacterAdded:Connect(OnCharacterAdded)
+    Player.CharacterRemoving:Connect(function()
+        if BoxHandles[Player.Character] then BoxHandles[Player.Character]:Destroy() BoxHandles[Player.Character] = nil end
+        if Player.Name == MyPartner and PartnerHealthBar then PartnerHealthBar.Gui:Destroy() PartnerHealthBar = nil end
+        if SpectateEnabled and Player.Name == MyPartner then
+            SpectateEnabled = false
+            if OriginalCameraSubject then Camera.CameraSubject = OriginalCameraSubject end
+            PartnerHumanoid = nil
+        end
+    end)
+end
+
+for _, Player in ipairs(Players:GetPlayers()) do OnPlayerAdded(Player) end
+Players.PlayerAdded:Connect(OnPlayerAdded)
+
+spawn(function()
+    while task.wait(2) do UpdateAllHitboxes() end
+end)
+
+if LocalPlayer.Character then
+    local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum then OriginalCameraSubject = hum end
+end
+
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(1)
+    local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum and not SpectateEnabled then
+        OriginalCameraSubject = hum
+        Camera.CameraSubject = hum
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(Input, GameProcessed)
+    if GameProcessed then return end
+    if Input.KeyCode == Enum.KeyCode.P then
+        AimbotEnabled = not AimbotEnabled
+    elseif Input.KeyCode == Enum.KeyCode.Insert then
+        ESPEnabled = not ESPEnabled
+        HostileGui.Enabled = ESPEnabled
+        if not ESPEnabled then
+            for _, hl in pairs(Highlights) do if hl then hl:Destroy() end end
+            Highlights = {}
+            for _, bill in pairs(ToolLabels) do bill:Destroy() end
+            ToolLabels = {}
+            if PartnerTracer then PartnerTracer.Visible = false end
+            if PartnerHealthBar then PartnerHealthBar.Gui.Enabled = false end
+            if DamageAlertGui then DamageAlertGui.Text.Visible = false end
+            HostileCountLabel.Text = "Hostiles: 0"
+            UpdatePulse(0)
+        end
+    elseif Input.KeyCode == Enum.KeyCode.U then
+        VisualizeHitbox = not VisualizeHitbox
+        UpdateAllHitboxes()
+    elseif Input.KeyCode == Enum.KeyCode.Plus or Input.KeyCode == Enum.KeyCode.Equals then
+        CurrentHitboxScale = math.min(CurrentHitboxScale + ScaleStep, MaxScale)
+        UpdateAllHitboxes()
+    elseif Input.KeyCode == Enum.KeyCode.Minus then
+        CurrentHitboxScale = math.max(CurrentHitboxScale - ScaleStep, MinScale)
+        UpdateAllHitboxes()
+    elseif Input.KeyCode == Enum.KeyCode.M then
+        ToggleSpectate()
+    elseif Input.KeyCode == Enum.KeyCode.K then
+        FullTeamESP = not FullTeamESP
+        print("Full Team ESP: " .. (FullTeamESP and "ON" or "OFF"))
+    elseif Input.UserInputType == Enum.UserInputType.MouseButton2 then
+        HoldingRMB = true
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(Input)
+    if Input.UserInputType == Enum.UserInputType.MouseButton2 then
+        HoldingRMB = false
+        CurrentTarget = nil
+    end
+end)
+
+RunService.RenderStepped:Connect(function()
+    UpdateSpectate()
+    if ESPEnabled then
+        UpdateESP()
+        UpdatePartnerTracer()
+        UpdatePartnerHealthBar()
+    end
+    if AimbotEnabled and HoldingRMB and not SpectateEnabled then
+        if not CurrentTarget or not IsTargetValid(CurrentTarget) then
+            CurrentTarget = GetClosestTarget()
+        end
+        if CurrentTarget and IsTargetValid(CurrentTarget) then
+            Camera.CFrame = CFrame.new(Camera.CFrame.Position, CurrentTarget.Position)
+        end
+    end
+end)
